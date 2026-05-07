@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.log
+.env
+.venv/
+venv/
+oauth_state.json
+twitch_tokens.json
+.tio.tokens.json
+debug-*.log

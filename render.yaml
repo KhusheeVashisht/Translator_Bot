@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: twitch-translator-bot
+    runtime: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python chat_translator.py"

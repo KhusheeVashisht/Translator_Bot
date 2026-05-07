@@ -1,0 +1,5 @@
+deep-translator
+fastapi
+httpx
+twitchio==2.8.2
+uvicorn[standard]
