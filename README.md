@@ -2,6 +2,8 @@
 
 A deployable Twitch chat translator that listens in one channel and reposts viewer messages in English using a separate bot account.
 
+For local development, copy `.env.example` to `.env` in the project root and fill in the Twitch values you want to use. The app now loads that file automatically on startup.
+
 ## Goal
 
 This project is set up for:
@@ -45,12 +47,23 @@ That means the bot logs into Twitch as `missbrainglitchbot`, joins `missbraingli
 
 7. Log in as `missbrainglitchbot` and approve access.
 
+## Run Locally
+
+1. Create a `.env` file from `.env.example`.
+2. Install dependencies with `pip install -r requirements.txt`.
+3. Start the app with `python chat_translator.py`.
+4. Open `http://127.0.0.1:8000/` in your browser.
+
+If you do not set Twitch credentials yet, the web app still starts and the health page will report that OAuth is not ready.
+
 ## Important Environment Variables
 
 ```env
 TWITCH_CLIENT_ID=your_twitch_client_id
 TWITCH_CLIENT_SECRET=your_twitch_client_secret
 TWITCH_REDIRECT_URI=https://your-render-service.onrender.com/auth/twitch/callback
+TWITCH_BOT_TOKEN=your_bot_access_token
+TWITCH_REFRESH_TOKEN=your_bot_refresh_token
 TARGET_CHANNEL=missbrainglitch
 BOT_PREFIX=!
 TARGET_LANGUAGE=en

@@ -5,6 +5,7 @@ import os
 import re
 import secrets
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -24,10 +25,47 @@ logging.basicConfig(
 )
 
 BASE_DIR = Path(__file__).resolve().parent
+
+
+def load_local_env(path: Path) -> None:
+    if not path.exists():
+        return
+
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        if "=" not in line:
+            continue
+
+        name, value = line.split("=", 1)
+        name = name.strip()
+        if not name or name in os.environ:
+            continue
+
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        os.environ[name] = value
+
+
+load_local_env(BASE_DIR / ".env")
 TOKENS_PATH = BASE_DIR / "twitch_tokens.json"
 STATE_PATH = BASE_DIR / "oauth_state.json"
 SCOPES = ["chat:read", "chat:edit"]
 URL_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
+PROXY_ENV_VARS = [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "GIT_HTTP_PROXY",
+    "GIT_HTTPS_PROXY",
+]
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -42,6 +80,8 @@ class Settings:
     twitch_client_id: str = os.getenv("TWITCH_CLIENT_ID", "").strip()
     twitch_client_secret: str = os.getenv("TWITCH_CLIENT_SECRET", "").strip()
     twitch_redirect_uri: str = os.getenv("TWITCH_REDIRECT_URI", "").strip()
+    bot_access_token: str = os.getenv("TWITCH_BOT_TOKEN", "").strip()
+    bot_refresh_token: str = os.getenv("TWITCH_REFRESH_TOKEN", "").strip()
     bot_channel: str = os.getenv("TARGET_CHANNEL", "missbrainglitch").strip().lower()
     bot_prefix: str = os.getenv("BOT_PREFIX", "!").strip() or "!"
     target_language: str = os.getenv("TARGET_LANGUAGE", "en").strip().lower()
@@ -74,6 +114,25 @@ class Settings:
 settings = Settings()
 
 
+def normalize_access_token(token: str) -> str:
+    return token.removeprefix("oauth:").strip()
+
+
+@contextmanager
+def cleared_proxy_env() -> Any:
+    saved = {name: os.environ.get(name) for name in PROXY_ENV_VARS}
+    try:
+        for name in PROXY_ENV_VARS:
+            os.environ.pop(name, None)
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
 def read_json(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -104,7 +163,7 @@ class TokenStore:
             self.path.unlink()
 
     def access_token(self) -> str | None:
-        token = self.load().get("access_token", "").strip()
+        token = normalize_access_token(self.load().get("access_token", ""))
         return token or None
 
 
@@ -128,13 +187,17 @@ class TranslationService:
 
         async with self._semaphore:
             translated = await asyncio.wait_for(
-                asyncio.to_thread(self._translator.translate, normalized),
+                asyncio.to_thread(self._translate_without_proxy, normalized),
                 timeout=settings.translate_timeout_seconds,
             )
 
         if translated:
             self._cache[normalized] = (now, translated)
         return translated
+
+    def _translate_without_proxy(self, text: str) -> str | None:
+        with cleared_proxy_env():
+            return self._translator.translate(text)
 
     async def wait_for_send_window(self) -> None:
         delta = time.time() - self._last_sent_at
@@ -181,6 +244,7 @@ class TranslatorBot(commands.Bot):
             response = f"[EN] {author}: {translated}"
             await translator_service.wait_for_send_window()
             await message.channel.send(response)
+            self.last_error = None
             self.last_translation = {
                 "author": author,
                 "original": content,
@@ -266,7 +330,7 @@ class BotManager:
 
     async def _get_start_token(self) -> str | None:
         file_payload = token_store.load()
-        access_token = (file_payload.get("access_token") or "").strip()
+        access_token = normalize_access_token(file_payload.get("access_token") or "")
         if access_token:
             try:
                 await validate_token(access_token)
@@ -274,7 +338,15 @@ class BotManager:
             except Exception as exc:  # noqa: BLE001
                 LOG.warning("Saved access token did not validate: %s", exc)
 
-        refresh_token = (file_payload.get("refresh_token") or "").strip()
+        env_token = normalize_access_token(settings.bot_access_token)
+        if env_token:
+            try:
+                await validate_token(env_token)
+                return env_token
+            except Exception as exc:  # noqa: BLE001
+                LOG.warning("Configured access token did not validate: %s", exc)
+
+        refresh_token = (file_payload.get("refresh_token") or "").strip() or settings.bot_refresh_token
         if refresh_token and settings.oauth_ready:
             try:
                 refreshed = await refresh_access_token(refresh_token)
@@ -286,7 +358,6 @@ class BotManager:
                 self.last_start_error = f"Refresh failed: {type(exc).__name__}: {exc}"
                 LOG.warning("Refresh token flow failed: %s", exc)
 
-        env_token = os.getenv("TWITCH_BOT_TOKEN", "").strip()
         return env_token or None
 
     def status(self) -> dict[str, Any]:
@@ -445,7 +516,7 @@ async def twitch_callback(code: str | None = None, state: str | None = None, err
 
 @app.get("/auth/twitch/validate")
 async def twitch_validate() -> dict[str, Any]:
-    token = token_store.access_token() or os.getenv("TWITCH_BOT_TOKEN", "").strip()
+    token = token_store.access_token() or normalize_access_token(settings.bot_access_token)
     if not token:
         raise HTTPException(status_code=404, detail="No saved bot token found.")
     return await validate_token(token)
@@ -454,7 +525,7 @@ async def twitch_validate() -> dict[str, Any]:
 @app.get("/auth/twitch/refresh")
 async def twitch_refresh() -> dict[str, Any]:
     payload = token_store.load()
-    refresh_token = (payload.get("refresh_token") or "").strip()
+    refresh_token = (payload.get("refresh_token") or "").strip() or settings.bot_refresh_token
     if not refresh_token:
         raise HTTPException(status_code=404, detail="No refresh token found.")
     if not settings.oauth_ready:
