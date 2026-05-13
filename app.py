@@ -13,8 +13,8 @@ from urllib.parse import urlencode
 
 import httpx
 from deep_translator import GoogleTranslator
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from twitchio.ext import commands
 
 
@@ -463,8 +463,7 @@ async def index() -> str:
     """
 
 
-@app.get("/health")
-async def health() -> dict[str, Any]:
+def build_health_payload() -> dict[str, Any]:
     return {
         "ok": True,
         "app": "twitch-chat-translator-bot",
@@ -472,6 +471,13 @@ async def health() -> dict[str, Any]:
         "redirect_uri": settings.twitch_redirect_uri,
         "bot_status": bot_manager.status(),
     }
+
+
+@app.api_route("/health", methods=["GET", "HEAD"], response_model=None)
+async def health(request: Request) -> dict[str, Any] | Response:
+    if request.method == "HEAD":
+        return Response(status_code=200)
+    return build_health_payload()
 
 
 @app.get("/auth/twitch/login")
